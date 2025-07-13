@@ -1,0 +1,14 @@
+flask==2.3.3
+flask-cors==4.0.0
+python-dotenv==1.0.0
+together==0.2.7
+langchain
+langchain-community
+langchain-core
+langchain-google-genai
+langchain-chroma==0.1.1
+chromadb==0.4.24
+pypdf==3.16.2
+werkzeug==2.3.7
+pathlib
+# shutil
