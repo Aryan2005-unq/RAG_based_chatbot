@@ -7,6 +7,8 @@ import tempfile
 from pathlib import Path
 import shutil
 from werkzeug.utils import secure_filename
+import atexit
+import signal
 
 # Groq AI for LLM
 from groq import Groq
@@ -34,7 +36,7 @@ load_dotenv()
 # Flask app setup
 app = Flask(__name__)
 CORS(app)
-app.secret_key = os.getenv('FLASK_SECRET_KEY', 'your_default_secret_key')  # For session management
+app.secret_key = os.getenv('FLASK_SECRET_KEY', 'your_default_secret_key')
 
 # Configuration
 UPLOAD_FOLDER = 'uploads'
@@ -56,13 +58,69 @@ redis_password = os.getenv('REDIS_PASSWORD')
 # Initialize Groq client
 groq_client = Groq(api_key=groq_api_key)
 
-# Redis client (optional direct connection for health checks)
+# Redis client
 redis_client = redis.Redis.from_url(redis_url, password=redis_password)
 
 # Global variables for document processing
 document_store = None
 embeddings = None
 text_splitter = None
+
+# CLEANUP FUNCTIONS
+def cleanup_all_sessions():
+    """Clean up all session data on app shutdown"""
+    try:
+        print("Starting cleanup process...")
+        
+        # Get all Redis keys for chat histories
+        pattern = "message_store:*"
+        keys = redis_client.keys(pattern)
+        
+        if keys:
+            redis_client.delete(*keys)
+            print(f"Deleted {len(keys)} session histories from Redis")
+        
+        # Clear ChromaDB
+        persist_directory = "./chroma_db"
+        if os.path.exists(persist_directory):
+            shutil.rmtree(persist_directory)
+            print("Cleared ChromaDB document store")
+        
+        # Clear uploaded files
+        if os.path.exists(UPLOAD_FOLDER):
+            for file in os.listdir(UPLOAD_FOLDER):
+                file_path = os.path.join(UPLOAD_FOLDER, file)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+            print("Cleared uploaded files")
+            
+        print("Cleanup completed successfully")
+        
+    except Exception as e:
+        print(f"Error during cleanup: {e}")
+
+def startup_cleanup():
+    """Clean up any existing data on startup"""
+    try:
+        print("Running startup cleanup...")
+        cleanup_all_sessions()
+        
+    except Exception as e:
+        print(f"Startup cleanup error: {e}")
+
+# Register cleanup function for graceful shutdown
+atexit.register(cleanup_all_sessions)
+
+# Handle SIGTERM and SIGINT (Ctrl+C)
+def signal_handler(signum, frame):
+    print(f"\nReceived signal {signum}. Shutting down gracefully...")
+    cleanup_all_sessions()
+    exit(0)
+
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
+# REST OF YOUR EXISTING CODE...
 
 def initialize_components():
     """Initialize embeddings and text splitter"""
@@ -157,7 +215,7 @@ Answer:
                     "content": formatted_prompt,
                 }
             ],
-            model="llama-3.3-70b-versatile",  # Or "mixtral-8x7b-32768" / "gemma-7b-it"
+            model="llama-3.3-70b-versatile",
             temperature=0.1,
             max_tokens=512,
             top_p=0.9,
@@ -238,7 +296,6 @@ def chat():
     if not input_prompt:
         return jsonify({'error': 'No message provided'}), 400
 
-    # Use Flask session or fallback to IP address for session ID
     session_id = session.get('session_id')
     if not session_id:
         session_id = request.remote_addr or os.urandom(8).hex()
@@ -247,13 +304,10 @@ def chat():
     memory = get_memory(session_id)
     chat_history = memory.load_memory_variables({}).get("chat_history", [])
 
-    # Store user message
     memory.chat_memory.add_user_message(input_prompt)
 
-    # Retrieve docs and context
     doc_response = retrieve_documents(input_prompt)
     if 'answer' in doc_response:
-        # Error occurred during doc retrieval
         return jsonify({
             'answer': doc_response['answer'],
             'response_time': doc_response['response_time'],
@@ -261,17 +315,13 @@ def chat():
             'chat_history': [m.content for m in chat_history]
         })
 
-    # Get LLM answer
     answer = get_groq_response(
         input_prompt, 
         doc_response['context_str'], 
         chat_history=chat_history
     )
 
-    # Store AI response
     memory.chat_memory.add_ai_message(answer)
-
-    # Reload updated chat history
     updated_chat_history = memory.load_memory_variables({}).get("chat_history", [])
 
     return jsonify({
@@ -280,6 +330,52 @@ def chat():
         'context': doc_response['context'],
         'chat_history': [m.content for m in updated_chat_history]
     })
+
+# NEW CLEANUP ROUTES
+@app.route('/cleanup', methods=['POST'])
+def cleanup_sessions():
+    """Manually clear all session data"""
+    try:
+        pattern = "message_store:*"
+        keys = redis_client.keys(pattern)
+        
+        if keys:
+            redis_client.delete(*keys)
+        
+        global document_store
+        document_store = None
+        
+        persist_directory = "./chroma_db"
+        if os.path.exists(persist_directory):
+            shutil.rmtree(persist_directory)
+        
+        for file in os.listdir(UPLOAD_FOLDER):
+            file_path = os.path.join(UPLOAD_FOLDER, file)
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+        
+        return jsonify({
+            'message': f'Cleaned up {len(keys)} sessions and cleared all data'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': f'Cleanup failed: {str(e)}'}), 500
+
+@app.route('/clear-session', methods=['POST'])
+def clear_current_session():
+    """Clear current session's chat history"""
+    session_id = session.get('session_id')
+    if session_id:
+        try:
+            redis_key = f"message_store:{session_id}"
+            redis_client.delete(redis_key)
+            session.clear()
+            
+            return jsonify({'message': 'Session cleared successfully'})
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+    
+    return jsonify({'message': 'No active session to clear'})
 
 @app.route('/status', methods=['GET'])
 def status():
@@ -297,4 +393,6 @@ def status():
     })
 
 if __name__ == "__main__":
+    startup_cleanup()  # Clean up on start
+    print("Starting Flask app with session cleanup enabled...")
     app.run(debug=True, host='0.0.0.0', port=5000)
