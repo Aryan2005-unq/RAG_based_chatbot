@@ -17,7 +17,8 @@ const statusDot = statusIndicator.querySelector('.status-dot');
 const statusText = statusIndicator.querySelector('.status-text');
 
 // Initialize the application
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', async function() {
+    await clearCurrentSession();  // Clear session on page load
     initializeEventListeners();
     checkDocumentStatus();
 });
@@ -31,7 +32,7 @@ function initializeEventListeners() {
     uploadArea.addEventListener('drop', handleDrop);
     fileInput.addEventListener('change', handleFileSelect);
     uploadBtn.addEventListener('click', uploadFiles);
-    clearBtn.addEventListener('click', clearFiles);
+    clearBtn.addEventListener('click', handleClearAll);
 
     // Chat events
     chatInput.addEventListener('keypress', handleChatKeyPress);
@@ -141,8 +142,9 @@ function updateUploadButton() {
     uploadBtn.disabled = selectedFiles.length === 0;
 }
 
-// Clear all files
-function clearFiles() {
+// Handle clear all action
+async function handleClearAll() {
+    await cleanupAll();
     selectedFiles = [];
     updateFileList();
     updateUploadButton();
@@ -161,13 +163,19 @@ async function uploadFiles() {
     });
     showLoading(true);
     try {
+        // Clear session before uploading new files
+        await clearCurrentSession();
+        
         const response = await fetch('/upload', { method: 'POST', body: formData });
         const result = await response.json();
         if (response.ok) {
             showToast('success', 'Success', result.message);
             isDocumentsLoaded = true;
             updateDocumentStatus(true);
-            clearFiles();
+            selectedFiles = [];
+            updateFileList();
+            updateUploadButton();
+            fileInput.value = '';
             clearChatMessages();
         } else {
             showToast('error', 'Upload Failed', result.error || 'Failed to upload files.');
@@ -344,4 +352,50 @@ function showToast(type, title, message) {
     setTimeout(() => {
         toast.remove();
     }, 4000);
+}
+
+// Session management functions
+async function clearCurrentSession() {
+    try {
+        const response = await fetch('/clear-session', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+        const result = await response.json();
+        if (!response.ok) {
+            console.error('Failed to clear session:', result.error);
+        } else {
+            clearChatMessages();
+            isDocumentsLoaded = false;
+            updateDocumentStatus(false);
+        }
+    } catch (error) {
+        console.error('Error clearing session:', error);
+    }
+}
+
+// Manual cleanup function
+async function cleanupAll() {
+    try {
+        const response = await fetch('/cleanup', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+        const result = await response.json();
+        if (!response.ok) {
+            showToast('error', 'Cleanup Failed', result.error || 'Failed to clean up data');
+        } else {
+            showToast('success', 'Cleanup Success', 'All data cleared successfully');
+            clearChatMessages();
+            isDocumentsLoaded = false;
+            updateDocumentStatus(false);
+        }
+    } catch (error) {
+        showToast('error', 'Cleanup Error', 'Failed to connect to server');
+        console.error('Cleanup error:', error);
+    }
 }
