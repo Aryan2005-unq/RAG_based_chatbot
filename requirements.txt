@@ -12,3 +12,5 @@ pypdf==3.16.2
 werkzeug==2.3.7
 pathlib
 # shutil
+groq
+redis
